@@ -1,0 +1,102 @@
+#!/usr/bin/env node
+// forge — rough idea → strong ready-to-paste Claude prompt, via three local `claude -p` agents:
+// interviewer (gap questions) → drafter → critic → drafter revises once.
+// CLI: forge <idea>   (skips the interview, states assumptions)   |   forge --selftest
+const { execFile } = require('child_process');
+const os = require('os');
+const fs = require('fs');
+
+// Explicit model ID because this account's CLI default 404s.
+const MODEL = process.env.FORGE_MODEL || 'claude-sonnet-5';
+
+// The `claude` on PATH can be a stale brew/nvm install without these flags; prefer the self-updating local one.
+const LOCAL = os.homedir() + '/.claude/local/claude';
+const CLAUDE = process.env.FORGE_CLAUDE || (fs.existsSync(LOCAL) ? LOCAL : 'claude');
+
+// Empty setting-sources + no tools = a plain LLM call: no hooks, plugins or CLAUDE.md leaking
+// into the prompt, while still using the Max-plan login (--bare would demand an API key).
+function ask(system, prompt) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(CLAUDE,
+      ['-p', '--model', MODEL, '--setting-sources', '', '--tools', '', '--system-prompt', system],
+      { cwd: os.tmpdir(), timeout: 180000, maxBuffer: 8 << 20 },
+      (err, stdout, stderr) => err ? reject(new Error((stderr || err.message).trim())) : resolve(stdout.trim()));
+    child.stdin.end(prompt);
+  });
+}
+
+const INTERVIEWER = `You prepare a rough idea for a prompt writer. The idea will become a prompt pasted into Claude, which will then do the work.
+Find the gaps where Claude would otherwise have to guess and a wrong guess would change what gets built or written.
+Ask 3 to 5 multiple-choice questions, most consequential first. Never ask about something the idea already states. Each question has 2 to 4 short, mutually exclusive options that cover the realistic choices.
+Output ONLY a JSON array, no prose, no code fence: [{"q":"question","options":["a","b","c"]}]`;
+
+const DRAFTER = `You write prompts that a person pastes into Claude (Claude Code or claude.ai) so the task is done well in one go. You receive their rough idea and their answers to clarifying questions.
+
+Write the prompt in second person, addressed to Claude, in plain direct prose with short markdown headings. Cover whatever of this applies to the task:
+- the goal and why it matters, and who will use the result
+- scope for the first version, and explicit non-goals so Claude does not over-build
+- the main flows or behaviours, concretely enough to be tested
+- data involved and where it comes from
+- technical constraints: platform, stack, where it runs, what it integrates with
+- how to work: a sensible build order, verify each step by actually running it, state assumptions and keep going, ask only if truly blocked
+- what done looks like: concrete acceptance checks
+
+Rules:
+- Use only what the user gave you. Where something is unknown, pick a sensible default and label it "Assumption:" so the user can edit it before pasting. Never invent business facts.
+- Explain the reason behind a constraint when it is not obvious; Claude follows reasons better than bare rules.
+- No flattery or persona fluff ("you are a world-class..."). No filler. Length fits the task: a few sentences for a small ask, 300 to 700 words for an app.
+Output ONLY the prompt text.`;
+
+const CRITIC = `You are the Claude that will receive this prompt cold, with none of its author's context. Review it before it is sent.
+List up to 6 concrete problems, worst first: ambiguity that would force you to guess, missing information you would need, contradictions, requirements that were invented rather than taken from the user's idea and answers, over-specification that would box you into a bad solution, and bloat.
+For each: quote the spot, say what is wrong, give the fix. If the prompt is already strong, say so and list only what is real. No praise, no rewrite.`;
+
+function brief(task, answers) {
+  const qa = (answers || []).filter(a => a && a.q && a.a).map(a => `- ${a.q} → ${a.a}`).join('\n');
+  return `<idea>\n${task}\n</idea>\n\n<answers>\n${qa || '(none given: choose sensible defaults and label them as assumptions)'}\n</answers>`;
+}
+
+// Models sometimes wrap JSON in a fence or a sentence; take the outermost array and keep only well-formed items.
+function parseQuestions(text) {
+  try {
+    const arr = JSON.parse(text.slice(text.indexOf('['), text.lastIndexOf(']') + 1));
+    return arr
+      .filter(x => x && typeof x.q === 'string' && Array.isArray(x.options) && x.options.length >= 2)
+      .slice(0, 5)
+      .map(x => ({ q: x.q, options: x.options.slice(0, 4).map(String) }));
+  } catch { return []; } // no questions just means the drafter works from assumptions
+}
+
+async function questions(task) {
+  return parseQuestions(await ask(INTERVIEWER, `<idea>\n${task}\n</idea>`));
+}
+
+async function build(task, answers, onStage = () => {}) {
+  const b = brief(task, answers);
+  onStage('draft');
+  const draft = await ask(DRAFTER, b);
+  onStage('critique');
+  const critique = await ask(CRITIC, `${b}\n\n<prompt_under_review>\n${draft}\n</prompt_under_review>`);
+  // ponytail: one revision pass, no loop; add a second pass only if finals still read weak.
+  onStage('revise');
+  return ask(DRAFTER, `${b}\n\n<your_draft>\n${draft}\n</your_draft>\n\n<review>\n${critique}\n</review>\n\nRevise the draft to fix the review's valid points; ignore any that would add invented facts or bloat. Output ONLY the final prompt.`);
+}
+
+module.exports = { questions, build };
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  if (args[0] === '--selftest') {
+    const assert = require('assert');
+    assert.deepStrictEqual(parseQuestions('Sure:\n```json\n[{"q":"Web or mobile?","options":["Web","Mobile"]},{"q":"bad","options":["x"]},{"nope":1}]\n```'),
+      [{ q: 'Web or mobile?', options: ['Web', 'Mobile'] }]);
+    assert.deepStrictEqual(parseQuestions('no json here'), []);
+    assert.ok(brief('x', [{ q: 'Q', a: 'A' }, { q: 'skipped', a: '' }]).includes('- Q → A'));
+    assert.ok(!brief('x', [{ q: 'skipped', a: '' }]).includes('skipped'));
+    console.log('selftest ok');
+  } else if (!args.length) {
+    console.error('usage: forge <describe what you need> | forge --selftest'); process.exit(1);
+  } else {
+    build(args.join(' '), []).then(console.log, e => { console.error(e.message); process.exit(1); });
+  }
+}

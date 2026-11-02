@@ -1,0 +1,11 @@
+# your own prompts stay local
+history.json
+history.json.tmp
+# build output (npm run icon / npm run build)
+Prompt Forge.app/
+PromptForge
+AppIcon.icns
+AppIcon.iconset/
+gen-icon
+node_modules/
+.DS_Store

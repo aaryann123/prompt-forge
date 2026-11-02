@@ -1,0 +1,13 @@
+{
+  "name": "prompt-forge",
+  "private": true,
+  "scripts": {
+    "dev": "node app.js",
+    "start": "node app.js",
+    "icon": "mkdir -p AppIcon.iconset && swiftc -swift-version 5 -framework AppKit icon.swift -o gen-icon && ./gen-icon && for s in 16 32 128 256 512; do sips -z $s $s AppIcon.iconset/icon_512x512@2x.png --out AppIcon.iconset/icon_${s}x${s}.png >/dev/null; sips -z $((s*2)) $((s*2)) AppIcon.iconset/icon_512x512@2x.png --out AppIcon.iconset/icon_${s}x${s}@2x.png >/dev/null; done && iconutil -c icns AppIcon.iconset && rm -rf AppIcon.iconset gen-icon",
+    "build": "[ -f AppIcon.icns ] || npm run icon; swiftc -O -swift-version 5 -framework AppKit -framework WebKit \"$PWD/main.swift\" -o PromptForge && mkdir -p 'Prompt Forge.app/Contents/MacOS' 'Prompt Forge.app/Contents/Resources' && mv PromptForge 'Prompt Forge.app/Contents/MacOS/' && cp Info.plist 'Prompt Forge.app/Contents/' && cp AppIcon.icns 'Prompt Forge.app/Contents/Resources/'",
+    "install-app": "npm run build && rm -rf \"$HOME/Applications/Prompt Forge.app\" && cp -R 'Prompt Forge.app' \"$HOME/Applications/\"",
+    "test": "./forge --selftest",
+    "screenshots": "node Tools/screenshots.mjs"
+  }
+}
